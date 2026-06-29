@@ -1,0 +1,23 @@
+const USER_ROLES = Object.freeze({
+  ADMIN: 'ADMIN',
+  USER: 'USER',
+});
+
+const TOKEN_TYPES = Object.freeze({
+  ACCESS: 'ACCESS',
+  REFRESH: 'REFRESH',
+});
+
+const AUTH_ERRORS = Object.freeze({
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
+  INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
+  INVALID_TOKEN: 'INVALID_TOKEN',
+  TOKEN_EXPIRED: 'TOKEN_EXPIRED',
+});
+
+module.exports = {
+  USER_ROLES,
+  TOKEN_TYPES,
+  AUTH_ERRORS,
+};

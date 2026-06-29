@@ -20,7 +20,7 @@ async function login(req, res, next) {
 
 async function refresh(req, res, next) {
   try {
-    const result = await authService.refresh(req.body);
+    const result = await authService.refresh(req.body?.refreshToken);
     return res.status(200).json(result);
   } catch (error) {
     return next(error);
@@ -29,7 +29,10 @@ async function refresh(req, res, next) {
 
 async function logout(req, res, next) {
   try {
-    const result = await authService.logout(req.body);
+    const result = await authService.logout({
+      ...req.body,
+      userId: req.user.id,
+    });
     return res.status(200).json(result);
   } catch (error) {
     return next(error);
