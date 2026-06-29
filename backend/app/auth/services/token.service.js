@@ -1,4 +1,5 @@
-const jwt = require("jsonwebtoken");
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 function getRequiredEnv(name) {
   const value = process.env[name];
@@ -11,8 +12,8 @@ function getRequiredEnv(name) {
 }
 
 function issueAccessToken(user) {
-  const secret = getRequiredEnv("JWT_ACCESS_SECRET");
-  const expiresIn = getRequiredEnv("JWT_ACCESS_EXPIRES_IN");
+  const secret = getRequiredEnv('JWT_ACCESS_SECRET');
+  const expiresIn = getRequiredEnv('JWT_ACCESS_EXPIRES_IN');
 
   return jwt.sign(
     {
@@ -22,15 +23,15 @@ function issueAccessToken(user) {
     },
     secret,
     {
-      algorithm: "HS256",
+      algorithm: 'HS256',
       expiresIn,
     }
   );
 }
 
 function issueRefreshToken(user) {
-  const secret = getRequiredEnv("JWT_REFRESH_SECRET");
-  const expiresIn = getRequiredEnv("JWT_REFRESH_EXPIRES_IN");
+  const secret = getRequiredEnv('JWT_REFRESH_SECRET');
+  const expiresIn = getRequiredEnv('JWT_REFRESH_EXPIRES_IN');
 
   return jwt.sign(
     {
@@ -38,42 +39,53 @@ function issueRefreshToken(user) {
     },
     secret,
     {
-      algorithm: "HS256",
+      algorithm: 'HS256',
       expiresIn,
+      jwtid: crypto.randomUUID(),
     }
   );
 }
 
 function verifyAccessToken(token) {
-  const secret = getRequiredEnv("JWT_ACCESS_SECRET");
+  const secret = getRequiredEnv('JWT_ACCESS_SECRET');
 
   try {
     return jwt.verify(token, secret, {
-      algorithms: ["HS256"],
+      algorithms: ['HS256'],
     });
   } catch (error) {
-    if (error && error.name === "TokenExpiredError") {
-      throw new Error("Access token has expired.");
+    if (error && error.name === 'TokenExpiredError') {
+      throw new Error('Access token has expired.');
     }
 
-    throw new Error("Invalid access token.");
+    throw new Error('Invalid access token.');
   }
 }
 
 function verifyRefreshToken(token) {
-  const secret = getRequiredEnv("JWT_REFRESH_SECRET");
+  const secret = getRequiredEnv('JWT_REFRESH_SECRET');
 
   try {
     return jwt.verify(token, secret, {
-      algorithms: ["HS256"],
+      algorithms: ['HS256'],
     });
   } catch (error) {
-    if (error && error.name === "TokenExpiredError") {
-      throw new Error("Refresh token has expired.");
+    if (error && error.name === 'TokenExpiredError') {
+      throw new Error('Refresh token has expired.');
     }
 
-    throw new Error("Invalid refresh token.");
+    throw new Error('Invalid refresh token.');
   }
+}
+
+function getTokenExpiry(token) {
+  const payload = jwt.decode(token);
+
+  if (!payload || typeof payload.exp !== 'number') {
+    throw new Error('Token expiry is missing.');
+  }
+
+  return new Date(payload.exp * 1000);
 }
 
 module.exports = {
@@ -81,4 +93,5 @@ module.exports = {
   issueRefreshToken,
   verifyAccessToken,
   verifyRefreshToken,
+  getTokenExpiry,
 };

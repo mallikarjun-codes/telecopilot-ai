@@ -1,161 +1,105 @@
+const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const prisma = require('../../db/prisma');
 
-const DEFAULT_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const TOKEN_HASH_ROUNDS = 12;
 
-function hashToken(token) {
-  if (typeof token !== 'string' || token.length === 0) {
-    throw new Error('Refresh token is required.');
-  }
-
+function digestToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function getSessionExpiryDate() {
-  return new Date(Date.now() + DEFAULT_SESSION_TTL_MS);
-}
-
-function toPlainObject(record) {
-  if (!record) {
-    return null;
-  }
-
-  return { ...record };
-}
-
-async function createSession({ userId, refreshToken }) {
-  if (!userId) {
-    throw new Error('User id is required.');
-  }
-
-  if (!refreshToken) {
+async function hashToken(token) {
+  if (!token) {
     throw new Error('Refresh token is required.');
   }
 
-  const session = await prisma.refreshSession.create({
+  return bcrypt.hash(digestToken(token), TOKEN_HASH_ROUNDS);
+}
+
+async function findMatchingSession(client, { userId, refreshToken }) {
+  const sessions = await client.refreshSession.findMany({
+    where: { userId },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  for (const session of sessions) {
+    if (await bcrypt.compare(digestToken(refreshToken), session.tokenHash)) {
+      return session;
+    }
+  }
+
+  return null;
+}
+
+async function createSession({ userId, refreshToken, expiresAt }, client = prisma) {
+  const tokenHash = await hashToken(refreshToken);
+
+  return client.refreshSession.create({
     data: {
       userId,
-      tokenHash: hashToken(refreshToken),
-      expiresAt: getSessionExpiryDate(),
+      tokenHash,
+      expiresAt,
     },
   });
-
-  return toPlainObject(session);
 }
 
-async function findSessionByToken(refreshToken) {
-  if (!refreshToken) {
-    throw new Error('Refresh token is required.');
-  }
-
-  const session = await prisma.refreshSession.findUnique({
-    where: {
-      tokenHash: hashToken(refreshToken),
-    },
-  });
-
-  return toPlainObject(session);
+async function findSessionByToken({ userId, refreshToken }) {
+  return findMatchingSession(prisma, { userId, refreshToken });
 }
 
-async function rotateSession({ userId, refreshToken, newRefreshToken }) {
-  if (!userId) {
-    throw new Error('User id is required.');
-  }
-
-  if (!refreshToken) {
-    throw new Error('Refresh token is required.');
-  }
-
-  if (!newRefreshToken) {
-    throw new Error('New refresh token is required.');
-  }
+async function rotateSession({
+  userId,
+  refreshToken,
+  newRefreshToken,
+  newExpiresAt,
+}) {
+  const newTokenHash = await hashToken(newRefreshToken);
 
   return prisma.$transaction(async (tx) => {
-    const currentTokenHash = hashToken(refreshToken);
-    const nextTokenHash = hashToken(newRefreshToken);
-
-    const existingSession = await tx.refreshSession.findFirst({
-      where: {
-        userId,
-        tokenHash: currentTokenHash,
-      },
+    const currentSession = await findMatchingSession(tx, {
+      userId,
+      refreshToken,
     });
 
-    if (!existingSession) {
-      throw new Error('Session not found.');
+    if (!currentSession || currentSession.revokedAt || currentSession.expiresAt <= new Date()) {
+      return null;
     }
 
-    if (existingSession.revokedAt) {
-      throw new Error('Session has been revoked.');
-    }
-
-    const session = await tx.refreshSession.update({
+    const revoked = await tx.refreshSession.updateMany({
       where: {
-        id: existingSession.id,
+        id: currentSession.id,
+        revokedAt: null,
       },
+      data: { revokedAt: new Date() },
+    });
+
+    if (revoked.count !== 1) {
+      return null;
+    }
+
+    return tx.refreshSession.create({
       data: {
-        tokenHash: nextTokenHash,
-        expiresAt: getSessionExpiryDate(),
+        userId,
+        tokenHash: newTokenHash,
+        expiresAt: newExpiresAt,
       },
     });
-
-    return toPlainObject(session);
   });
 }
 
-async function revokeSession(refreshToken) {
-  if (!refreshToken) {
-    throw new Error('Refresh token is required.');
-  }
+async function revokeSession({ userId, refreshToken }) {
+  return prisma.$transaction(async (tx) => {
+    const session = await findMatchingSession(tx, { userId, refreshToken });
 
-  const session = await prisma.refreshSession.findUnique({
-    where: {
-      tokenHash: hashToken(refreshToken),
-    },
+    if (!session || session.revokedAt) {
+      return null;
+    }
+
+    return tx.refreshSession.update({
+      where: { id: session.id },
+      data: { revokedAt: new Date() },
+    });
   });
-
-  if (!session) {
-    throw new Error('Session not found.');
-  }
-
-  const revokedSession = await prisma.refreshSession.update({
-    where: {
-      id: session.id,
-    },
-    data: {
-      revokedAt: new Date(),
-    },
-  });
-
-  return toPlainObject(revokedSession);
-}
-
-async function revokeAllSessions(userId) {
-  if (!userId) {
-    throw new Error('User id is required.');
-  }
-
-  const sessions = await prisma.refreshSession.findMany({
-    where: {
-      userId,
-    },
-  });
-
-  if (sessions.length === 0) {
-    return { count: 0 };
-  }
-
-  await prisma.refreshSession.updateMany({
-    where: {
-      userId,
-      revokedAt: null,
-    },
-    data: {
-      revokedAt: new Date(),
-    },
-  });
-
-  return { count: sessions.length };
 }
 
 module.exports = {
@@ -163,5 +107,4 @@ module.exports = {
   findSessionByToken,
   rotateSession,
   revokeSession,
-  revokeAllSessions,
 };

@@ -3,160 +3,168 @@ const tokenService = require('./token.service');
 const sessionService = require('./session.service');
 const prisma = require('../../db/prisma');
 
+const PASSWORD_HASH_ROUNDS = 12;
+
 function createHttpError(message, statusCode = 500) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
 }
 
-function sanitizeUser(user) {
-  if (!user) {
-    return null;
-  }
-
-  const { passwordHash, ...rest } = user;
-  return rest;
+function toPublicUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    createdAt: user.createdAt,
+  };
 }
 
-async function register(userData) {
-  const { name, email, password, role = 'USER' } = userData || {};
+async function createTokenPair(user) {
+  const accessToken = tokenService.issueAccessToken(user);
+  const refreshToken = tokenService.issueRefreshToken(user);
 
-  if (!name || !email || !password) {
-    throw createHttpError('Name, email, and password are required.', 400);
-  }
+  await sessionService.createSession({
+    userId: user.id,
+    refreshToken,
+    expiresAt: tokenService.getTokenExpiry(refreshToken),
+  });
 
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-    throw createHttpError('A valid email address is required.', 400);
-  }
+  return { accessToken, refreshToken, tokenType: 'Bearer' };
+}
 
-  const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+async function register({ name, email, password }) {
+  const normalizedEmail = email.toLowerCase();
+  const existingUser = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+  });
+
   if (existingUser) {
     throw createHttpError('An account with this email already exists.', 409);
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
-  const user = await prisma.user.create({
-    data: {
-      name: String(name).trim(),
-      email: normalizedEmail,
-      passwordHash,
-      role,
-    },
-  });
+  const passwordHash = await bcrypt.hash(password, PASSWORD_HASH_ROUNDS);
+  let user;
 
-  const accessToken = tokenService.issueAccessToken(user);
-  const refreshToken = tokenService.issueRefreshToken(user);
-  await sessionService.createSession({ userId: user.id, refreshToken });
+  try {
+    user = await prisma.user.create({
+      data: {
+        name,
+        email: normalizedEmail,
+        passwordHash,
+      },
+    });
+  } catch (error) {
+    if (error.code === 'P2002') {
+      throw createHttpError('An account with this email already exists.', 409);
+    }
+
+    throw error;
+  }
 
   return {
-    user: sanitizeUser(user),
-    accessToken,
-    refreshToken,
-    tokenType: 'Bearer',
+    user: toPublicUser(user),
+    ...(await createTokenPair(user)),
   };
 }
 
-async function login(credentials) {
-  const { email, password } = credentials || {};
+async function login({ email, password }) {
+  const user = await prisma.user.findUnique({
+    where: { email: email.toLowerCase() },
+  });
 
-  if (!email || !password) {
-    throw createHttpError('Email and password are required.', 400);
-  }
+  const passwordMatches = user
+    ? await bcrypt.compare(password, user.passwordHash)
+    : false;
 
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-
-  if (!user || !user.isActive) {
+  if (!user || !user.isActive || !passwordMatches) {
     throw createHttpError('Invalid credentials.', 401);
   }
-
-  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
-  if (!passwordMatches) {
-    throw createHttpError('Invalid credentials.', 401);
-  }
-
-  const accessToken = tokenService.issueAccessToken(user);
-  const refreshToken = tokenService.issueRefreshToken(user);
-  await sessionService.createSession({ userId: user.id, refreshToken });
 
   return {
-    user: sanitizeUser(user),
-    accessToken,
-    refreshToken,
-    tokenType: 'Bearer',
+    user: toPublicUser(user),
+    ...(await createTokenPair(user)),
   };
 }
 
 async function refresh(refreshToken) {
-  if (!refreshToken) {
-    throw createHttpError('Refresh token is required.', 400);
-  }
+  let payload;
 
-  const payload = tokenService.verifyRefreshToken(refreshToken);
-  const userId = payload.userId || payload.sub || payload.id;
-
-  if (!userId) {
+  try {
+    payload = tokenService.verifyRefreshToken(refreshToken);
+  } catch (error) {
     throw createHttpError('Invalid refresh token.', 401);
   }
 
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const user = await prisma.user.findUnique({ where: { id: payload.id } });
   if (!user || !user.isActive) {
     throw createHttpError('Invalid refresh token.', 401);
   }
 
-  const session = await sessionService.findSessionByToken(refreshToken);
+  const session = await sessionService.findSessionByToken({
+    userId: user.id,
+    refreshToken,
+  });
+
   if (!session || session.revokedAt || session.expiresAt <= new Date()) {
     throw createHttpError('Invalid refresh token.', 401);
   }
 
   const newRefreshToken = tokenService.issueRefreshToken(user);
-  await sessionService.rotateSession({
+  const rotatedSession = await sessionService.rotateSession({
     userId: user.id,
     refreshToken,
     newRefreshToken,
+    newExpiresAt: tokenService.getTokenExpiry(newRefreshToken),
   });
 
+  if (!rotatedSession) {
+    throw createHttpError('Invalid refresh token.', 401);
+  }
+
   return {
-    user: sanitizeUser(user),
     accessToken: tokenService.issueAccessToken(user),
     refreshToken: newRefreshToken,
     tokenType: 'Bearer',
   };
 }
 
-async function logout(logoutData) {
-  const { refreshToken, userId, revokeAll } = logoutData || {};
+async function logout({ userId, refreshToken }) {
+  let payload;
 
-  if (revokeAll && userId) {
-    await sessionService.revokeAllSessions(userId);
-    return { success: true };
+  try {
+    payload = tokenService.verifyRefreshToken(refreshToken);
+  } catch (error) {
+    throw createHttpError('Invalid refresh token.', 401);
   }
 
-  if (!refreshToken && !userId) {
-    throw createHttpError('Refresh token or user id is required.', 400);
+  if (payload.id !== userId) {
+    throw createHttpError('Invalid refresh token.', 401);
   }
 
-  if (refreshToken) {
-    await sessionService.revokeSession(refreshToken);
-  } else if (userId) {
-    await sessionService.revokeAllSessions(userId);
+  const revokedSession = await sessionService.revokeSession({
+    userId,
+    refreshToken,
+  });
+
+  if (!revokedSession) {
+    throw createHttpError('Invalid refresh token.', 401);
   }
 
-  return { success: true };
+  return { message: 'Logged out successfully.' };
 }
 
-async function me(user) {
-  if (!user || !user.id) {
-    throw createHttpError('Authentication is required.', 401);
-  }
+async function me(authenticatedUser) {
+  const user = await prisma.user.findUnique({
+    where: { id: authenticatedUser.id },
+  });
 
-  const currentUser = await prisma.user.findUnique({ where: { id: user.id } });
-  if (!currentUser || !currentUser.isActive) {
+  if (!user || !user.isActive) {
     throw createHttpError('User not found.', 404);
   }
 
-  return sanitizeUser(currentUser);
+  return toPublicUser(user);
 }
 
 module.exports = {
