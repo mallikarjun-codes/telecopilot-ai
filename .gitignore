@@ -141,3 +141,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Local knowledge document uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
