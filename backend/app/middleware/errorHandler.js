@@ -1,7 +1,5 @@
 'use strict';
 
-const env = require('../config/env');
-
 module.exports = (err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;
 
@@ -10,8 +8,8 @@ module.exports = (err, req, res, next) => {
     message: err.message || 'Internal Server Error',
   };
 
-  if (env.nodeEnv === 'development') {
-    response.stack = err.stack;
+  if (err.details) {
+    response.errors = err.details;
   }
 
   return res.status(statusCode).json(response);
